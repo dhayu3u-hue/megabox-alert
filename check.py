@@ -6,12 +6,12 @@ now = datetime.datetime.now(KST)
 
 BRCH_NO = os.environ["BRCH_NO"]
 KEYWORDS = [k.strip() for k in os.environ.get("KEYWORDS", "치이카와").split(",") if k.strip()]
-DAYS_AHEAD = int(os.environ.get("DAYS_AHEAD", "10"))
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 MANUAL = os.environ.get("EVENT_NAME") == "workflow_dispatch"
 
-WANT_WEEKDAYS = (2,)  # 알림 받을 상영 요일: 수=2
+MAX_AHEAD = 8          # 오늘부터 며칠 뒤까지 열린 것으로 볼지
+WANT_WEEKDAYS = (2,)   # 알림 받을 상영 요일: 수=2
 
 if not MANUAL and now.weekday() not in (2, 5):
     print("수/토가 아니라 종료")
@@ -71,63 +71,87 @@ except Exception:
 today = now.date()
 today_s = today.strftime("%Y%m%d")
 all_seen = set(k for k in seen if k.split("|")[0] >= today_s)
-new_by_date = {}
-match_dates = {}
-sample = None
-errors = 0
-consec_err = 0
-last_open_ds = None
 
-for i in range(DAYS_AHEAD + 1):
-    d = today + datetime.timedelta(days=i)
-    ds = d.strftime("%Y%m%d")
+LOOK = 21 if MANUAL else MAX_AHEAD
+kw_by_date = {}
+errors = 0
+consec = 0
+fetched_any = False
+
+for i in range(LOOK + 1):
+    ds = (today + datetime.timedelta(days=i)).strftime("%Y%m%d")
     try:
         items = fetch(ds)
-        consec_err = 0
+        consec = 0
+        fetched_any = True
     except Exception as e:
         errors += 1
-        consec_err += 1
+        consec += 1
         print("조회 실패", ds, repr(e)[:100])
-        if consec_err >= 3:
+        if consec >= 3:
             break
         continue
-    # 오늘 이후로 극장 전체 시간표가 비어 있으면 거기서 중단 (예매 안 열린 날짜)
-    if i >= 1 and not items:
+    kws = [it for it in items if any(k in it.get("movieNm", "") for k in KEYWORDS)]
+    if kws:
+        kw_by_date[ds] = kws
+
+if not fetched_any:
+    print("조회 실패 (연결 안 됨)")
+    sys.exit(1)
+
+# 오늘부터 빈틈없이 이어진 날짜만 '예매 열림'으로 본다
+run = []
+started = False
+for i in range(MAX_AHEAD + 1):
+    ds = (today + datetime.timedelta(days=i)).strftime("%Y%m%d")
+    if ds in kw_by_date:
+        run.append(ds)
+        started = True
+    elif started or i > 1:
         break
-    last_open_ds = ds
-    for it in items:
-        name = it.get("movieNm", "")
-        if not any(k in name for k in KEYWORDS):
-            continue
+
+if MANUAL:
+    rows = []
+    for ds in sorted(kw_by_date):
+        its = kw_by_date[ds]
+        ev = ",".join(sorted({str(x.get("eventProgrs")) for x in its}))
+        ba = ",".join(sorted({str(x.get("bokdAbleAt")) for x in its}))
+        rest = sum(int(x.get("restSeatCnt") or 0) for x in its)
+        tot = sum(int(x.get("totSeatCnt") or 0) for x in its)
+        mark = "열림" if ds in run else "제외"
+        rows.append(f"{ds[4:6]}/{ds[6:]} {mark} {len(its)}건 ev={ev} ok={ba} 좌석{rest}/{tot}")
+    last_run = run[-1] if run else "-"
+    tg(
+        f"✅ 진단 실행\n열린 것으로 본 마지막 날짜: {last_run[4:6]}/{last_run[6:]}\n"
+        f"조회 실패: {errors}건\n" + "\n".join(rows)
+    )
+    fake_dates = [ds for ds in sorted(kw_by_date) if ds not in run and run and ds > run[-1]]
+    if run and fake_dates:
+        a = kw_by_date[run[-1]][0]
+        b = kw_by_date[fake_dates[0]][0]
+        skip = {"playDe", "viewDe", "playStartTime", "playEndTime", "seq", "theabNo",
+                "theabOnlineOrd", "theabExpoNm", "theabEngNm", "theabSeatCnt", "theabKindCd"}
+        diff = [f"{k}: {str(a.get(k))[:25]} | {str(b.get(k))[:25]}"
+                for k in sorted(set(a) | set(b)) if k not in skip and a.get(k) != b.get(k)]
+        tg(f"🔍 열림({run[-1][4:]}) vs 제외({fake_dates[0][4:]}) 차이\n" + "\n".join(diff[:40]))
+    print("진단 완료 (상태 저장 안 함)")
+    sys.exit(0)
+
+new_by_date = {}
+for ds in run:
+    d = datetime.datetime.strptime(ds, "%Y%m%d").date()
+    if d.weekday() not in WANT_WEEKDAYS:
+        continue
+    for it in kw_by_date[ds]:
         if not is_open(it):
-            continue
-        if sample is None:
-            sample = it
-        match_dates[ds] = match_dates.get(ds, 0) + 1
-        if d.weekday() not in WANT_WEEKDAYS:
             continue
         st = str(it.get("playStartTime", ""))
         if ds == today_s and st and st < now.strftime("%H:%M"):
             continue
-        key = f"{ds}|v5|{it.get('playSchdlNo') or (name + st)}"
+        key = f"{ds}|v6|{it.get('playSchdlNo') or (it.get('movieNm', '') + st)}"
         all_seen.add(key)
         if key not in seen:
             new_by_date.setdefault(ds, []).append(it)
-
-if last_open_ds is None:
-    print("조회 실패 (연결 안 됨)")
-    sys.exit(1)
-
-if MANUAL:
-    dates_txt = ", ".join(f"{ds[4:6]}/{ds[6:]}" for ds in sorted(match_dates)) or "없음"
-    tg(
-        f"✅ 진단 실행\n예매 열린 마지막 날짜: {last_open_ds[4:6]}/{last_open_ds[6:]}\n"
-        f"치이카와 있는 날짜: {dates_txt}\n조회 실패: {errors}건"
-    )
-    if sample:
-        tg("DEBUG 샘플:\n" + json.dumps(sample, ensure_ascii=False))
-    print("진단 완료 (상태 저장 안 함)")
-    sys.exit(0)
 
 first_run = "__seeded__" not in seen
 all_seen.add("__seeded__")
@@ -146,7 +170,7 @@ else:
             lines.append(f"\n[{name}]")
             for it in sorted(its, key=lambda x: str(x.get("playStartTime"))):
                 st = str(it.get("playStartTime", ""))
-                theab = it.get("theabEngNm") or it.get("theabExpoNm") or it.get("theabNm") or ""
+                theab = it.get("theabEngNm") or it.get("theabExpoNm") or ""
                 lines.append(f"- {st} {theab}".strip())
         lines.append("\n예매: https://www.megabox.co.kr/booking")
         tg("\n".join(lines))
