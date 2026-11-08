@@ -1,5 +1,4 @@
-
-import os, sys, json, datetime
+import os, sys, json, time, datetime
 import requests
 
 KST = datetime.timezone(datetime.timedelta(hours=9))
@@ -11,6 +10,7 @@ DAYS_AHEAD = int(os.environ.get("DAYS_AHEAD", "21"))
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 MANUAL = os.environ.get("EVENT_NAME") == "workflow_dispatch"
+AREA = os.environ.get("AREA_CD", "30")
 
 WANT_WEEKDAYS = (2,)  # 알림 받을 상영 요일: 수=2
 
@@ -19,14 +19,20 @@ if not MANUAL and now.weekday() not in (2, 5):
     sys.exit(0)
 
 STATE_FILE = "state.json"
-URL = "https://www.megabox.co.kr/on/oh/ohb/SimpleBooking/selectBokdList.do"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+BOOK_URL = "https://www.megabox.co.kr/on/oh/ohb/SimpleBooking/selectBokdList.do"
+SCHED_URL = "https://www.megabox.co.kr/on/oh/ohc/Brch/schedulePage.do"
+UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+H_JSON = {
+    "User-Agent": UA,
     "Referer": "https://www.megabox.co.kr/booking",
     "X-Requested-With": "XMLHttpRequest",
     "Content-Type": "application/json; charset=UTF-8",
     "Accept": "application/json",
 }
+H_FORM_BOOK = dict(H_JSON, **{"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"})
+H_FORM_SCHED = dict(
+    H_FORM_BOOK, **{"Referer": f"https://www.megabox.co.kr/theater?brchNo={BRCH_NO}"}
+)
 WD = "월화수목금토일"
 
 
@@ -39,6 +45,19 @@ def tg(text):
     r.raise_for_status()
 
 
+def post(url, retries=3, **kw):
+    last = None
+    for _ in range(retries):
+        try:
+            r = requests.post(url, timeout=(12, 25), **kw)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:
+            last = e
+            time.sleep(3)
+    raise last
+
+
 def build(ds, v):
     p = {
         "arrMovieNo": "", "areaCd1": "", "areaCd2": "", "areaCd3": "",
@@ -46,24 +65,81 @@ def build(ds, v):
         "brchNoListCnt": 1, "brchSpcl": "",
         "movieNo1": "", "movieNo2": "", "movieNo3": "",
         "playDe": ds, "sellChnlCd": "",
-        "spclbYn1": "N", "spclbYn2": "", "spclbYn3": "",
+        "spclbYn1": "", "spclbYn2": "", "spclbYn3": "",
         "theabKindCd1": "", "theabKindCd2": "", "theabKindCd3": "",
     }
+    if v in (0, 3):
+        p["areaCd1"] = AREA
     if v == 1:
-        p["spclbYn1"] = ""
+        p["areaCd1"] = AREA
+        p["spclbYn1"] = "N"
+        p["theabKindCd1"] = "N"
     if v == 2:
-        p["brchNoListCnt"] = "1"
+        p["areaCd1"] = AREA
+        p["brchAll"] = "N"
+        p["brchSpcl"] = "N"
+        p["spclbYn1"] = "N"
+        p["theabKindCd1"] = "N"
+    if v == 4:
+        p["spclbYn1"] = "N"
+        p["theabKindCd1"] = "N"
     return p
 
 
-def fetch(ds, v):
-    r = requests.post(URL, json=build(ds, v), headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    j = r.json()
+def fetch(ds, v, retries=3):
+    p = build(ds, v)
+    if v == 3:
+        j = post(BOOK_URL, retries=retries, data=p, headers=H_FORM_BOOK)
+    else:
+        j = post(BOOK_URL, retries=retries, json=p, headers=H_JSON)
     if j.get("statCd") == -1:
         raise RuntimeError("statCd -1: " + str(j.get("msg")))
     lst = j.get("movieFormList") or j.get("megaMap", {}).get("movieFormList") or []
     return lst, j
+
+
+def sched_items(ds):
+    data = {
+        "masterType": "brch", "detailType": "area", "brchNo": BRCH_NO,
+        "firstAt": "N", "brchNo1": BRCH_NO, "crtDe": ds, "playDe": ds,
+    }
+    j = post(SCHED_URL, retries=2, data=data, headers=H_FORM_SCHED)
+    return j.get("megaMap", {}).get("movieFormList", []) or []
+
+
+def kw_items(items):
+    return [it for it in items if any(k in it.get("movieNm", "") for k in KEYWORDS)]
+
+
+def send_diagnostics(probe_lines):
+    tg("❌ 예매 조회 방식을 못 찾았어요\n" + "\n".join(probe_lines))
+    today = now.date()
+    rows = []
+    near = far = None
+    for i in range(0, 16):
+        d = today + datetime.timedelta(days=i)
+        ds = d.strftime("%Y%m%d")
+        try:
+            its = kw_items(sched_items(ds))
+        except Exception as e:
+            rows.append(f"{ds[4:6]}/{ds[6:]}: 오류")
+            continue
+        first = min((str(x.get("playStartTime")) for x in its), default="-")
+        rest = sum(int(x.get("restSeatCnt") or 0) for x in its)
+        tot = sum(int(x.get("totSeatCnt") or 0) for x in its)
+        rows.append(f"{ds[4:6]}/{ds[6:]}({WD[d.weekday()]}): {len(its)}건, 첫 {first}, 좌석 {rest}/{tot}")
+        if its and i == 1:
+            near = its[0]
+        if its and i == 15:
+            far = its[0]
+    tg("📋 날짜별 치이카와(극장 페이지 데이터)\n" + "\n".join(rows))
+    if near and far:
+        diff = []
+        for k in sorted(set(near) | set(far)):
+            if near.get(k) != far.get(k):
+                diff.append(f"{k}: {str(near.get(k))[:30]} | {str(far.get(k))[:30]}")
+        tg("🔍 가까운 날짜 vs 먼 날짜 차이\n" + "\n".join(diff[:40]))
+        tg("샘플(가까운 날짜):\n" + json.dumps(near, ensure_ascii=False))
 
 
 try:
@@ -75,28 +151,26 @@ except Exception:
 today = now.date()
 today_s = today.strftime("%Y%m%d")
 
-# 어떤 요청 방식이 되는지 확인 (오늘, 내일로 시험)
 good = None
-probe_errs = []
-for v in range(3):
-    for off in (0, 1):
+probe_lines = []
+for v in range(5):
+    for off in (1, 0):
         ds = (today + datetime.timedelta(days=off)).strftime("%Y%m%d")
         try:
-            lst, raw = fetch(ds, v)
+            lst, raw = fetch(ds, v, retries=2)
             if lst:
                 good = v
                 break
-            probe_errs.append(f"v{v}/{ds}: 빈 목록 " + json.dumps(raw, ensure_ascii=False)[:200])
+            probe_lines.append(f"v{v}/{ds[4:]}: 0건 키={','.join(list(raw.keys())[:6])}")
         except Exception as e:
-            probe_errs.append(f"v{v}/{ds}: " + repr(e)[:200])
+            probe_lines.append(f"v{v}/{ds[4:]}: {repr(e)[:70]}")
     if good is not None:
         break
 
 if good is None:
-    msg = "❌ 예매 조회 방식이 맞지 않아요\n" + "\n".join(probe_errs)
-    print(msg)
+    print("\n".join(probe_lines))
     if MANUAL:
-        tg(msg)
+        send_diagnostics(probe_lines)
     sys.exit(1)
 
 all_seen = set(k for k in seen if k.split("|")[0] >= today_s)
