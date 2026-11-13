@@ -3,7 +3,7 @@ name: lotte-check
 on:
   workflow_dispatch:
   schedule:
-    - cron: "5-59/10 * * * *"
+    - cron: "8,38 * * * *"
 
 permissions:
   contents: write
@@ -15,6 +15,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,8 +29,18 @@ jobs:
           LOTTE_CINEMA_ID: "1|0002|3018"
           KEYWORDS: "치이카와"
           EVENT_NAME: ${{ github.event_name }}
-        run: python lotte.py
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python lotte.py
+          else
+            end=$(( $(date +%s) + 2100 ))
+            while [ $(date +%s) -lt $end ]; do
+              python lotte.py || true
+              sleep 60
+            done
+          fi
       - name: Save state
+        if: always()
         run: |
           git config user.name "bot"
           git config user.email "bot@users.noreply.github.com"
