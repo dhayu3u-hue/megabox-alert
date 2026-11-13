@@ -10,12 +10,8 @@ TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 MANUAL = os.environ.get("EVENT_NAME") == "workflow_dispatch"
 
-MAX_AHEAD = 8          # 오늘부터 며칠 뒤까지 열린 것으로 볼지
+MAX_AHEAD = 14         # 오늘부터 며칠 뒤까지 확인할지
 WANT_WEEKDAYS = (2,)   # 알림 받을 상영 요일: 수=2
-
-if not MANUAL and now.weekday() not in (2, 5):
-    print("수/토가 아니라 종료")
-    sys.exit(0)
 
 STATE_FILE = "state.json"
 URL = "https://www.megabox.co.kr/on/oh/ohc/Brch/schedulePage.do"
@@ -122,18 +118,9 @@ if MANUAL:
         rows.append(f"{ds[4:6]}/{ds[6:]} {mark} {len(its)}건 ev={ev} ok={ba} 좌석{rest}/{tot}")
     last_run = run[-1] if run else "-"
     tg(
-        f"✅ 진단 실행\n열린 것으로 본 마지막 날짜: {last_run[4:6]}/{last_run[6:]}\n"
-        f"조회 실패: {errors}건\n" + "\n".join(rows)
+        f"✅ 메가박스 진단 실행\n열린 것으로 본 마지막 날짜: {last_run[4:6]}/{last_run[6:]}\n"
+        f"조회 실패: {errors}건\n" + "\n".join(rows[:15])
     )
-    fake_dates = [ds for ds in sorted(kw_by_date) if ds not in run and run and ds > run[-1]]
-    if run and fake_dates:
-        a = kw_by_date[run[-1]][0]
-        b = kw_by_date[fake_dates[0]][0]
-        skip = {"playDe", "viewDe", "playStartTime", "playEndTime", "seq", "theabNo",
-                "theabOnlineOrd", "theabExpoNm", "theabEngNm", "theabSeatCnt", "theabKindCd"}
-        diff = [f"{k}: {str(a.get(k))[:25]} | {str(b.get(k))[:25]}"
-                for k in sorted(set(a) | set(b)) if k not in skip and a.get(k) != b.get(k)]
-        tg(f"🔍 열림({run[-1][4:]}) vs 제외({fake_dates[0][4:]}) 차이\n" + "\n".join(diff[:40]))
     print("진단 완료 (상태 저장 안 함)")
     sys.exit(0)
 
@@ -158,11 +145,11 @@ all_seen.add("__seeded__")
 
 if first_run:
     n = sum(len(v) for v in new_by_date.values())
-    tg(f"🔧 기준 저장 완료\n지금 열려 있는 수요일 회차 {n}개를 기억했어요.\n이제부터 새로 열리는 것만 알려드릴게요.")
+    tg(f"🔧 메가박스 기준 저장 완료\n지금 열려 있는 수요일 회차 {n}개를 기억했어요.\n이제부터 새로 열리는 것만 알려드릴게요.")
 else:
     for ds in sorted(new_by_date):
         d = datetime.datetime.strptime(ds, "%Y%m%d")
-        lines = ["🎬 금정AK플라자 예매 오픈!", f"{d.month}/{d.day}({WD[d.weekday()]})"]
+        lines = ["🎬 메가박스 금정AK플라자 예매 오픈!", f"{d.month}/{d.day}({WD[d.weekday()]})"]
         by_movie = {}
         for it in new_by_date[ds]:
             by_movie.setdefault(it.get("movieNm", ""), []).append(it)
