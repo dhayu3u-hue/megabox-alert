@@ -10,8 +10,8 @@ TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 MANUAL = os.environ.get("EVENT_NAME") == "workflow_dispatch"
 
-MAX_AHEAD = 14         # 오늘부터 며칠 뒤까지 확인할지
-WANT_WEEKDAYS = (2,)   # 알림 받을 상영 요일: 수=2
+MAX_AHEAD = 14            # 오늘부터 며칠 뒤까지 확인할지
+WANT_WEEKDAYS = (2, 5)    # 알림 받을 상영 요일: 월0 화1 수2 목3 금4 토5 일6
 
 STATE_FILE = "lotte_state.json"
 URL = "https://www.lottecinema.co.kr/LCWS/Ticketing/TicketingData.aspx"
@@ -22,6 +22,8 @@ HEADERS = {
     "Origin": "https://www.lottecinema.co.kr",
 }
 WD = "월화수목금토일"
+SEED_KEY = "__seeded_" + "".join(str(w) for w in WANT_WEEKDAYS) + "__"
+WANT_TXT = "·".join(WD[w] for w in WANT_WEEKDAYS)
 
 
 def tg(text):
@@ -181,12 +183,12 @@ for ds in run:
         if key not in seen:
             new_by_date.setdefault(ds, []).append(it)
 
-first_run = "__seeded__" not in seen
-all_seen.add("__seeded__")
+first_run = SEED_KEY not in seen
+all_seen.add(SEED_KEY)
 
 if first_run:
     n = sum(len(v) for v in new_by_date.values())
-    tg(f"🔧 롯데 기준 저장 완료\n지금 열려 있는 수요일 회차 {n}개를 기억했어요.\n이제부터 새로 열리는 것만 알려드릴게요.")
+    tg(f"🔧 롯데 기준 저장 완료 ({WANT_TXT})\n지금 새로 기억한 회차 {n}개.\n이제부터 새로 열리는 {WANT_TXT}요일 회차만 알려드릴게요.")
 else:
     for ds in sorted(new_by_date):
         d = datetime.datetime.strptime(ds, "%Y-%m-%d")
